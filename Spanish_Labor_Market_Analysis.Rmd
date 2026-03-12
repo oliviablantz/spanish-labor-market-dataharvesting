@@ -1,0 +1,1375 @@
+---
+title: "Final Data Harvesting Project"
+output: html_document
+author: "Olivia Blantz, Adela Solis, Samantha Lee Riordan"
+course: "Data Harvesting, UC3M"
+date: "2026-03-05"
+---
+
+# Data Harvesting: An Investigation of the Spanish Labor Market
+
+## Index
+
+-   Introduction and Research Question
+-   API Data Collection (Adzuna)
+-   Web Scraping Data Collection (Portal de Empleo)
+-   Data Exploration, Visualizations, and Conclusion
+
+## Introduction {#introduction}
+
+This project collects Spanish job postings from two independent sources: the Adzuna REST API, and the Spanish government's public employment portal (administracion.gob.es). The following code is meant to analyze the structure of the Spanish labor market across sectors, regions, and salary distributions, including the detection of ML/AI skill prevalence in the private market.
+
+#### [Research Question]{.underline}
+
+*What does the current Spanish labor market look like across sectors and regions, and how do public and private sector employment differ?*
+
+#### Data Sources
+
+**Adzuna API**
+
+-   Adzuna is a REST API providing private-sector job listings information, including insight into historical trends, salary ranges, and cross sector analytical tools.
+
+**Gobierno De España - Portal de Empleo**
+
+-   administracion.gob.es is Spain's official public employment portal. We scraped this using Selenium to obtain the information provided for job listings such as salary averages, educational requirements and location.
+
+#### Output Overview
+
+Data collection overall produces six dataframes:
+
+**API**
+
+1.  **Available jobs currently listed on Adzuna (1 dataframe)**
+
+The total number of jobs currently listed in Spain on Adzuna. This is a cumulative dataset that will monitor changes in the number of jobs available each time the code is run.
+
+2.  **Categories for Spain** **(2 dataframes)**
+
+The number of jobs currently listed for each category located in Spain. This is divided into two parts:
+
+-   The first collects the total number of jobs across currently listed across all categories to compare over time.
+
+-   The second collects specific job listings (within API limits) across categories to compare salaries, location and job categories.
+
+3.  **Job Search Phrases (2 dataframes)**
+
+The number of jobs by phrase returns all jobs that contain the set phrases within the title or description. It is divided into the same two parts as for Categories for Spain.
+
+**Web scrape - Portal de Empleo**
+
+-   The public sector scraping produces a dataframe containing 9 columns covering the variables of Title, Organo, titulación, salary group identification, salary average, the total posts, region of the posting, sector type, and the source.
+
+#### Libraries
+
+```{r setup, message = FALSE, warning = FALSE}
+library(httr2)
+library(tidyverse)
+library(jsonlite)
+library(xml2)
+library(lubridate)
+# Scraping 
+library(selenium)
+library(xml2)
+library(tidyverse)
+library(robotstxt)
+# Visualisations 
+library(leaflet)
+library(crosstalk)
+library(sf)
+library(giscoR)
+```
+
+#### Set User Agent
+
+For later scraping! Users must set this to their own unique credentials.
+
+```{r}
+# Set your user-agent string before navigating
+my_user_agent <- "your-name/academic-project (UC3M Data Harvesting 2026; contact: your_email@email.com)"
+
+```
+
+## API Data Collection (Adzuna)
+
+**Default API Access Limits**
+
+While this API provides access to millions of job advertisements across multiple countries, the default API access limits to 25 requests per minute, 250 per day, 1000 per week and 2500 per month. We are therefore focusing our research on the salary data and locations across a portion of job categories in Spain. The datasets obtained with the API and are currently structured to stay within the 250 hits per day limits.
+
+#### Authentication Set up
+
+Credentials are stored in the user's home directory `.Renviron` file so that they are never committed to GitHub. See the README for setup instructions.
+
+```{r}
+app_id  <- Sys.getenv("ADZUNA_APP_ID")
+app_key <- Sys.getenv("ADZUNA_APP_KEY")
+
+# Stops the knit immediately if credentials are missing
+# This ensures that the error occurs immediately rather than during the scraping loop incase app ID and key has not been set 
+stopifnot(
+  "ADZUNA_APP_ID not found in .Renviron" = nchar(app_id) > 0,
+  "ADZUNA_APP_KEY not found in .Renviron" = nchar(app_key) > 0)
+```
+
+#### Endpoints
+
+The server for the API is `https://api.adzuna.com/v1/api`, offering seven endpoints (all are GET: search, catgeories, histogram, top companies, geodata, history, and version). All endpoints, except for `/version`, append `/jobs/{country}` to the base URL. Since all calls in this script are for Spain (`es`), the base path has been set to [`https://api.adzuna.com/v1/api/jobs/es`](https://api.adzuna.com/v1/api/jobs/es).
+
+**Note:**
+
+-   Query parameters `app_id` and `app_key` (set above) are required for every request.
+
+-   Endpoint `search` requires additional path parameter `{page}` (integer)
+
+Adzuna API allows us to query the current job listings, with endpoint `GET/jobs/{country}/search/{page}` The key parameters of this endpoint are...
+
+-   `what`: Keywords (e.g., "Javascript Developer").
+
+-   `where`: Location (e.g., "London" or a postal code).
+
+-   `salary_min` / `salary_max`: Filter by pay range.
+
+-   `full_time` / `permanent`: Filter by contract type (use `1` for true).
+
+```{r}
+# API
+main_api_path <- paste0("https://api.adzuna.com/v1/api/jobs/es")
+```
+
+**Link**: Adzuna API [Interactive Endpoint Documentation](https://developer.adzuna.com/activedocs#/){.uri}
+
+**Check Version**\
+Things change! Call the [version endpoint](https://developer.adzuna.com/docs/version) to find out which API version you're querying.
+
+### Current Jobs on Adzuna
+
+This code below runs a simple API request to the first job listing on page one, but is used to obtain the metadata about the number of current listing from the full dataset. This is
+
+Using `resp_body_json(simplifyVector = TRUE)` we convert the JSON response (the first job listing on the first page) into a dataframe to reduce **noise?** from the response as it is not relevant here, and extract the count metadata to observe how many jobs are currently
+
+1.  Run the code below that extracts the count meta data
+
+```{r}
+first_res <- main_api_path |>
+  request() |>
+  req_url_path_append("search", 1) |> # page 1
+  req_url_query(app_id = app_id, 
+                app_key = app_key, 
+                results_per_page = 1) |>
+  req_perform() |>
+  resp_body_json(simplifyVector = TRUE)
+# Remove the '#' if you want to view the dataframe output and metadata 
+# first_res
+```
+
+2.  Save the count data (`total_jobs`) with the time stamp and view to see how many jobs listings are currently on Adzuna
+
+```{r}
+# Total number of jobs
+total_jobs <- tibble(
+  date = Sys.Date(), 
+  total_jobs = first_res$count)
+total_jobs
+```
+
+3.  Append to the existing file
+
+**Note**: `eval` is set to false to prevent this code from running on every knit and needs to be run manually to prevent duplicate entries.
+
+```{r eval=FALSE, include=FALSE}
+# Manually run
+# Append to existing csv file 
+if (file.exists("data/job_counts.csv")) {
+  total_jobs <- bind_rows(read_csv("data/job_counts.csv"), total_jobs)
+}
+
+write_csv(total_jobs, "data/job_counts.csv")
+```
+
+4.  Display Comparison
+
+```{r}
+# Visualise changes over time
+read_csv("data/job_counts.csv") |>
+  mutate(
+    date = as.Date(date)) |>
+  ggplot(aes(x = date, y = total_jobs)) +
+  geom_line() +
+  geom_point() +
+  labs(
+    title = "Job listings in Spain over time",
+    x = "Date",
+    y = "Total job listings",
+    caption = paste("Source: Adzuna API |", Sys.Date())) +
+  theme_minimal()
+```
+
+To compare the number of job listings on Adzuna over time, the results can be saved in a CSV to the repository, recording the date that the metadata was obtained and the total number of jobs.
+
+### Job Categories
+
+We first query the categories endpoint to retrieve all available sector tags for Spain. These tags are required parameters for filtering job searches. From this we can see that there are 29 job categories and one category that groups unknown ads.
+
+```{r}
+cats_data <- main_api_path |>
+  request() |>
+  req_url_path_append("categories") |>
+  req_url_query(app_id = app_id, 
+                app_key = app_key) |>
+  req_perform() |>
+  resp_body_json(simplifyVector = TRUE) |> 
+  as_tibble()
+
+# Returns a tibble including variable class which is not needed 
+head(cats_data$results)
+
+# Keep only label and tag 
+cats_df <- cats_data$results |> 
+  select(!`__CLASS__`)
+cats_df
+```
+
+#### Total Listings Across Categories
+
+This code makes one API request per job category to retrieve the total number of listings in each category, without downloading the actual job data. By setting the page number to 1 we only retrieve one result per request as we only need the response from the metadata. The metadata then allows us to not only compare the number of total job listings per category, but also determine in the next step how many individual job listings we can obtain within the API limits.
+
+```{r}
+# Check total results per search term before scraping
+# 30 calls 
+category_counts <- list()
+
+for (cat in cats_df$tag) {
+  categ <- main_api_path |>
+    request() |>
+    req_url_path_append("search", 1) |>
+    req_url_query(app_id = app_id, 
+                  app_key = app_key,
+                  results_per_page = 1, 
+                  category = cat) |>
+    req_perform() |>
+    resp_body_json(simplifyVector = TRUE)
+  
+  category_counts <- c(category_counts, list(tibble(
+    job_cat = cat,
+    no_jobs = categ$count)))
+} 
+
+cat_checkdist <- bind_rows(category_counts) |> 
+  arrange(desc(no_jobs)) |> 
+  mutate(pct = no_jobs/sum(no_jobs))
+cat_checkdist
+```
+
+Before we fetch the individual job listings, we can compare the total job listings for each category over time, using the same process outlined above to compare total number of jobs listed for Spain.
+
+1.  Save the count data (`total_jobs`) with the time stamp and view to see how many jobs listings are currently on Adzuna.
+
+```{r}
+# Save each count to its own var with timestamp 
+cat_cf <- cat_checkdist |>    
+  select(job_cat, no_jobs) |>    
+  pivot_wider(names_from = job_cat, # for a tidyier export               
+              values_from = no_jobs) |>    
+  mutate(date = Sys.Date(), .before = 1) 
+cat_cf
+```
+
+3.  Append to the existing file
+
+**Note**: `eval` is set to false to prevent this code from running on every knit and needs to be run manually to prevent duplicate entries.
+
+```{r snapshot_cats, eval=FALSE, include=FALSE}
+# Manually run
+# Append to existing csv file
+if (file.exists("data/job_cats.csv")) {
+  cat_cf <- bind_rows(read_csv("data/job_cats.csv"), cat_cf)
+}
+write_csv(cat_cf, "data/job_cats.csv")
+```
+
+4.  Display Comparison
+
+To compare the number of job listings per category on Adzuna over time, the results can be saved in a CSV to the repository, recording the date that the metadata was obtained. For now, this chunk will not run.
+
+```{r eval=FALSE, include=FALSE}
+# Visualise changes over time  
+read_csv("data/job_cats.csv") |>   
+  mutate(date = as.Date(date)) |>   
+  pivot_longer(-date,                 
+               names_to = "job_cat",                 
+               values_to = "no_jobs") |>    
+  ggplot(aes(x = date, y = no_jobs,               
+             colour = job_cat)) +   
+  geom_line() +   
+  geom_point() +   
+  labs(     
+    title = "Categories of Job Listings in Spain Over Time",     
+    x = "Date",     
+    y = "Number of job listings",     
+    colour = "Job Category",
+    caption = paste("Source: Adzuna API |", Sys.Date())) +   
+  scale_colour_discrete(
+    guide = guide_legend(
+      ncol = 1, # arrange into 3 columns - large number of job cats
+      keysize = 0.5, # smaller legend keys
+      title = "Job Category")) +
+  theme_minimal() +
+  theme(
+    legend.text = element_text(size = 6), 
+    legend.title = element_text(size = 7),
+    legend.key.size = unit(0.3, "cm"))
+```
+
+#### Individual Job Listings per Category
+
+Initial checks for the distribution of the number of jobs per category show the unknown job category accounts for a significant proportion of the job listings (n = 80%). The unknown category represents unclassified listings, which we decided to exclude from the data set while obtaining specific job listings (see next section).
+
+After removing the `unknown` job category, the number of pages are calculated proportional to the percentage of jobs within each category. The maximum number of pages has been set to 100 to stay within the API limits (250 per day) and removing `unknown` avoids distorting coverage of meaningful job categories.
+
+-   **Note:** the code below uses `round` to ensure that page numbers are whole for the category loop below. Rounding will naturally fluctuate by ± 1 - 2 pages depending on the job counts at the time of running.
+-   `pmax(1, ...)` is required to set the page minimum to 1 as otherwise it would be 0 and the API would not recognise page 0, however be mindful that when working within hit limits that this will increase the total number of pages (\~105).
+
+```{r}
+# Re-run the code to calculate prop with cat `unknown` removed
+cat_countsdf <- bind_rows(category_counts) |> 
+  filter(job_cat != "unknown", # remove unknown 
+         no_jobs > 0) |> # remove job cats with no obs to avoid error when collecting data
+  arrange(desc(no_jobs)) |> 
+  mutate(pages = pmax(1, round(no_jobs/sum(no_jobs) * 100)))
+cat_countsdf
+
+# You can check the number of pages with this code 
+sum(cat_countsdf$pages)
+```
+
+Here, we loop through all available categories, collecting the proportional number of pages for each category (calculated above) setting the number of job listings parameter to 50 results per page. We use parameters `sort_by = "date"` to retrieve the most recent listings and `max_days_old = 30` to limit to postings from the last month. This gives us a current look at the Spanish job market.
+
+Running this takes about four minutes. A two-second delay between requests (`Sys.sleep(2)`)ensures that the API does not exceed 25 hits per second as per the terms of service - default API access limits.
+
+```{r}
+all_jobs <- list()
+for (cat in cat_countsdf$job_cat) {
+  page_p_cat <- cat_countsdf$pages[cat_countsdf$job_cat == cat]
+  for (pg in 1:page_p_cat) {
+    Sys.sleep(2)
+    jobs <- main_api_path |>
+    request() |>
+    req_url_path_append("search", pg) |>
+    req_url_query(app_id = app_id, 
+                  app_key = app_key, 
+                  category = cat,
+                  results_per_page = 50,
+                  sort_by = "date",
+                  max_days_old = 30) |>
+    req_perform() |>
+    resp_body_json(simplifyVector = TRUE)
+    
+    if(!is.data.frame(jobs$results) || nrow(jobs$results) == 0) next # this skips empty pages incase changes occur between pre-check and now
+  
+    jobs$results$category_tag <- cat
+    all_jobs <- c(all_jobs, list(jobs$results)) # concatinate to avoid pages rewriting in each category 
+  }
+}
+```
+
+The results contain multiple layers of nested dataframes for the variables category, location and company - this code pulls the required fields for our RQ (area, nested in location var, and category) - see output below
+
+```{r}
+head(bind_rows(all_jobs))
+head(bind_rows(all_jobs)$location)
+```
+
+All of the areas contain between one and four locations moving from most to least specific. To make regions comparable (with public data later) and not too specific, we extract at maximum the second regional layer and then reduce specificity depending on availability.
+
+```{r}
+# Example of area locations
+head(bind_rows(all_jobs)$location$area)
+```
+
+Function to extract the third area level or less
+
+```{r}
+get_area <- function(area_list){
+  if (length(area_list) >= 2) area_list[[2]]
+  else if (length(area_list) == 1) area_list[[1]]
+  else NA
+}
+```
+
+Combine all into one data frame
+
+```{r}
+all_jobs_df <- bind_rows(all_jobs) |>
+  jsonlite::flatten() |>
+  mutate(area = map_chr(location.area, get_area)) |>
+  select(
+    category_label = category.label,
+    latitude, longitude, 
+    area, title, description, contract_type,
+    category_tag, salary_max, salary_min) # drop original nested columns and others not needed 
+all_jobs_df
+```
+
+### AI/ML Search Phrases
+
+This section is similar to the steps outlined above, but rather than jobs listings per category, we define terms related to AI/ML and Data Science using the path parameter `what_phrase`, that queries the desired phrase present in the job title or description.
+
+-   **Note:** The phrase can be changed as desired however the more individual phrases the `job_words` variable contains, the more calls.
+
+Use the code below to determine the number of results per search term will ensure that the data collected stays within API limits. You should not exceed more than \~ 100 hits, that is, data from more than 100 pages across all phrases.
+
+```{r}
+# Set desired phrases 
+# 8 phrases 
+job_words <- c(
+  "data scientist", "machine learning","data engineer",
+  "NLP", "MLOps", "AI engineer", "computer vision",
+  "generative AI")
+
+# Get total count from first page across all phrases 
+phrases <- list()
+
+for (title in job_words) {
+  res <- main_api_path |>
+    request() |>
+    req_url_path_append("search", 1) |>
+    req_url_query(app_id = app_id, 
+                  app_key = app_key,
+                  results_per_page = 1, 
+                  what_phrase = title) |>
+    req_perform() |>
+    resp_body_json(simplifyVector = TRUE)
+  
+  phrases <- c(phrases, list(tibble(
+    job_phrase = title, 
+    job_num = res$count)))
+}
+
+# Check results per search term before continuing to ensure results are within API limits
+phrases_df <- bind_rows(phrases) |> 
+  arrange(desc(job_num)) |> 
+  mutate(page_per_phrase = pmax(1, ceiling(job_num/50))) # using ceiling so that all pages are rounded up and listings are not excluded 
+phrases_df
+# Or use sum to check how many calls total 
+sum(phrases_df$page_per_phrase)
+```
+
+#### Job listings with Phrases (over time)
+
+Before we fetch the individual job listings, we can compare the total job listings for each of the terms defined above over time, using the same process outlined above to compare total number of jobs listed for Spain and number of jobs per category.
+
+-   **Note:** if the phrases have been changed or this step is not required, continue to the next section.
+
+1.  Save the count data (`total_jobs`) with the time stamp and view to see how many jobs listings are currently on Adzuna.
+
+```{r}
+# Save each count to its own var with timestamp
+phrase_jobs <- phrases_df |> 
+  select(job_phrase, job_num) |> 
+  pivot_wider(names_from = job_phrase, # for a tidyier export
+              values_from = job_num) |> 
+  mutate(date = Sys.Date(), .before = 1)
+phrase_jobs
+```
+
+3.  Append to the existing file
+
+**Note**: `eval` is set to false to prevent this code from running on every knit and needs to be run manually to prevent duplicate entries.
+
+```{r snapshot_phrase, eval = FALSE}
+# Manually run 
+# Append to existing csv file  
+if (file.exists("data/job_phrases.csv")) {
+  phrase_jobs <- bind_rows(read_csv("data/job_phrases.csv"), phrase_jobs)
+}
+write_csv(phrase_jobs, "data/job_phrases.csv")
+```
+
+4.  Display Comparison
+
+```{r}
+# Visualise changes over time 
+read_csv("data/job_phrases.csv") |>
+  mutate(date = as.Date(date)) |>
+  pivot_longer(-date, 
+               names_to = "job_phrase", 
+               values_to = "job_num") |> 
+  ggplot(aes(x = date, y = job_num, 
+             colour = job_phrase)) +
+  geom_line() +
+  geom_point() +
+  labs(
+    title = "AI/ML & Data Science Job Listings in Spain Over Time",
+    x = "Date",
+    y = "Number of job listings",
+    colour = "Search term") +
+  theme_minimal()
+```
+
+To compare the number of job listings on Adzuna over time, the results can be saved in a CSV to the repository, recording the date that the metadata was obtained and the total number of jobs.
+
+#### Available jobs by Phrase
+
+Similar to the available jobs per category, we loop through the job phrases, collecting the total number of pages for each search term (calculated above).
+
+```{r}
+# Function to fetch jobs from one title 
+# Currently at ~60 calls 
+job_phrase <- list() 
+for (title in phrases_df$job_phrase) {
+  pages <- phrases_df$page_per_phrase[phrases_df$job_phrase == title]
+  for (pg in 1:pages) {
+    Sys.sleep(2)
+    result <- main_api_path |>
+    request() |>
+    req_url_path_append("search", pg) |>
+    req_url_query(app_id = app_id, 
+                  app_key = app_key,
+                  results_per_page = 50,
+                  sort_by = "date", 
+                  what_phrase = title) |>
+    req_perform() |>
+    resp_body_json(simplifyVector = TRUE)
+    
+    if(!is.data.frame(result$results) || nrow(result$results) == 0) next # this skips empty pages incase changes occur between pre-check and now
+  
+    result$results$search_title  <- title
+    result$results$category_label <- result$results$category$label
+    job_phrase <- c(job_phrase, list(result$results)) # concatinate to avoid pages rewriting in each category 
+  }
+}
+```
+
+For this case, we need to check if there are any duplicates in the jobs obtained due to the same job title or description matching multiple of the defined phrases.
+
+```{r}
+# Total rows as is
+job_phrase_df <- bind_rows(job_phrase)
+nrow(job_phrase_df)
+
+# Check for duplicates 
+sum(duplicated(job_phrase_df$id))
+
+# Remove duplicate IDs 
+job_phrase_df <- job_phrase_df |> 
+  distinct(id, .keep_all = TRUE)
+# Total rows after 
+nrow(job_phrase_df)
+```
+
+**Data frame**
+
+```{r}
+# Combine all into one data frame 
+phrase_data <- job_phrase_df |>
+  jsonlite::flatten() |>
+  select(
+    category_label, search_title, latitude, longitude,
+    title, description, contract_time, 
+    salary_max, salary_min) # drop original nested columns and others not needed 
+phrase_data
+```
+
+#### API Limitations
+
+Adzuna returns a short description snippet, not the full job posting text. AI keyword counts are a lower bound.
+
+-   A limited number of listings we observed when building this scraper include salary data. Salary analysis should be interpreted with caution.
+
+-   Some salaries may be Adzuna predictions rather than employer-posted figures (flagged via `salary_predicted` field).
+
+-   The `max_days_old = 30` parameter limits results to the most recent month; results will differ when re-run at a later date.
+
+## Web Scraping: [Portal de Empleo](administracion.gob.es)
+
+For our web scraping section, we will be using Selenium to scrape JavaScript-rendered content from the Spanish Government's public employment search portal.
+
+We began to approach this through traditional static methods such as rvest/httr2, but it could not be scraped because this website's content is only rendered after JavaScript executes. Job titles, administration bodies, salary or qualifications are all dynamically loaded and invisible to read_html(). Once we realised this, we decided to work with Selenium, which solves this by opening a real browser and interacting with the page exactly as a human would.
+
+#### Setup
+
+We begin by checking for permission to scrape.
+
+```{r}
+get_robotstxt("https://administracion.gob.es")
+```
+
+Then, we safely stop any existing Selenium sessions from previous runs.
+
+```{r}
+tryCatch(server$kill(), error = function(e) NULL)
+tryCatch(driver$close(), error = function(e) NULL)
+
+Sys.sleep(3)
+```
+
+#### Launch Selenium
+
+Then, we proceed with selenium_server(), which starts the Java-based Selenium server locally. We decided to use Firefox as our browser because, with geckodriver 0.36.0, it provided a reliable and reproducible alternative. But, in order to make it replicable, we create a value that detects the Firefox path automatically across different operating systems.
+
+```{r}
+server <- selenium_server(temp = FALSE, verbose = TRUE)
+wait_for_selenium_available(timeout = 60)
+
+firefox_binary <- if (.Platform$OS.type == "windows") {
+  "C:/Program Files/Mozilla Firefox/firefox.exe"
+} else if (Sys.info()["sysname"] == "Darwin") {
+  "/Applications/Firefox.app/Contents/MacOS/firefox"  # macOS
+} else {
+  "/usr/bin/firefox"  # Linux
+}
+
+driver <- SeleniumSession$new(
+  browser = "firefox",
+  capabilities = firefox_options(binary = firefox_binary, 
+                                 prefs = list("general.useragent.override" = my_user_agent))
+)
+
+driver$navigate("https://administracion.gob.es/pagFront/empleoBecas/empleo/buscadorEmpleo.htm")
+
+Sys.sleep(5) # we allow time for the JavaScript to render the initial page content 
+```
+
+Alternatively, if using Chrome, set the chunk below to run and delete the chunk above.
+
+```{r eval=FALSE, include=FALSE}
+server <- selenium_server(temp = FALSE, verbose = TRUE)
+wait_for_selenium_available(timeout = 60)
+
+chrome_binary <- if (.Platform$OS.type == "windows") {
+  "C:/Program Files/Google/Chrome/Application/chrome.exe"
+} else if (Sys.info()["sysname"] == "Darwin") {
+  "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"  # macOS
+} else {
+  "/usr/bin/google-chrome"  # Linux
+}
+
+driver <- SeleniumSession$new(
+  browser = "chrome",
+  capabilities = chrome_options(binary = chrome_binary, prefs = list("general.useragent.override" = my_user_agent))
+)
+
+driver$navigate("https://administracion.gob.es/pagFront/empleoBecas/empleo/buscadorEmpleo.htm")
+Sys.sleep(5)
+```
+
+### Scraping
+
+Here, we begin scraping. We use find_element() with a CSS selector to locate the search button by its 'name' attribute, then click() to submit the form.
+
+We control the pagination size by setting it to 100 and submitting the form via execute_script(), so we reduce the total scraping time.
+
+```{r}
+# click search button
+driver$find_element(
+  using = "css selector",
+  value = "button[name='busquedaSimple']"
+)$click()
+Sys.sleep(5)
+
+# set 100 results per page
+driver$execute_script(
+  "document.getElementById('numRegistrosMostrarHidden').value = '100';
+   document.getElementById('formBuscadorFiltros').submit();"
+)
+Sys.sleep(5)
+
+# check how many results loaded
+page_source <- driver$get_page_source()
+```
+
+#### Parse Function
+
+We define a reusable parsing function that accepts a raw page source string and returns a clean tibble. We use XPath selectors throughout *//h3*, job reference and title (always present, used as row anchor), *//*$$contains(text(), 'X')$$/.. finds the hiring organisation and the number of posts advertised in each 'convocatoria', qualifications needed and applying period. These were invisible when we first tried static rvest scraping.
+
+```{r}
+# parse function 
+parse_gob_page <- function(page_source) {
+  html_code <- page_source |> read_html()
+  
+  titles_raw <- html_code |>
+    xml_find_all("//h3") |>
+    xml_text(trim = TRUE)
+  
+  organos_raw <- html_code |>
+    xml_find_all("//*[contains(text(), 'Órgano convocante')]/..") |>
+    xml_text(trim = TRUE)
+  
+  convocadas_raw <- html_code |>
+    xml_find_all("//*[contains(text(), 'Convocadas')]/..") |>
+    xml_text(trim = TRUE)
+  
+  titulacion_raw <- html_code |>
+    xml_find_all("//*[contains(text(), 'Titulación')]/..") |>
+    xml_text(trim = TRUE)
+  
+  plazo_raw <- html_code |>
+    xml_find_all("//*[contains(text(), 'Plazo de presentación')]/..") |>
+    xml_text(trim = TRUE)
+  
+  n <- min(length(titles_raw), length(organos_raw))
+  if (n == 0) return(NULL)
+  
+  tibble(
+    title      = titles_raw[seq_len(n)],
+    organo     = organos_raw[seq_len(n)],
+    convocadas = convocadas_raw[seq_len(n)],
+    titulacion = titulacion_raw[seq_len(n)],
+    plazo      = ifelse(length(plazo_raw) >= n, plazo_raw[seq_len(n)], NA_character_),
+    source     = "admin_gob_scrape"
+  )
+}
+```
+
+#### Collecting Pages
+
+We create a loop pattern and iterate over all result pages. On each iteration we: locate the next ("siguiente") button using XPath on its 'title' attribute, we click it to navigate to the next page, we capture the newly rendered HTML with get_page_source() and we parse and append to our results list.
+
+We use tryCatch() to wrap find_element() so that when the "siguiente" button no longer exists (last page reached), the loop exits cleanly rather than throwing an error. We have decided to cap at page 50 to approximate one month of publications (more or less 350 listings), as checked on the website, which would be consistent with the 30-day window used in our Adzuna API data collection, making the two datasets temporally comparable.
+
+We attempted to filter results by publication date using the advanced search form (búsqueda avanzada). However, the date fields are rendered inside a JavaScript accordion element whose inputs remained inaccessible to Selenium despite multiple approaches. We therefore scrape all current listings and cap at 50 pages as a temporal approximation.
+
+```{r}
+all_gob    <- list()
+all_gob[[1]] <- parse_gob_page(page_source)
+print(paste("Page 1:", nrow(all_gob[[1]]), "rows"))
+
+pg         <- 2
+keep_going <- TRUE
+
+while (keep_going && pg <= 50) {
+  print(pg)
+  
+  next_btn <- tryCatch(
+    driver$find_element(
+      using = "xpath",
+      value = "//button[contains(@title, 'siguiente')]"
+    ),
+    error = function(e) NULL
+  )
+  
+  if (is.null(next_btn)) {
+    print("No more pages — done!")
+    keep_going <- FALSE
+    break
+  }
+  
+  next_btn$click()
+  Sys.sleep(3)
+  
+  page_source <- driver$get_page_source()
+  result      <- parse_gob_page(page_source)
+  
+  if (is.null(result) || nrow(result) == 0) {
+    print("Empty page — done!")
+    keep_going <- FALSE
+    break
+  }
+  
+  all_gob[[pg]] <- result
+  print(paste("Page", pg, ":", nrow(result), "rows"))
+  pg <- pg + 1
+}
+
+df_scrape_raw <- bind_rows(all_gob)
+print(paste("Total rows collected:", nrow(df_scrape_raw)))
+
+write_csv(df_scrape_raw, "data_scrape.csv")
+```
+
+We check how many rows we ended up with and save the raw data into our files before cleaning to prevent data loss.
+
+### Cleaning Process
+
+#### Region Data
+
+In order to be able to do a comparison across public and private sectors, we try to see if any of our variables has any information on job location, so that we can extract the region.
+
+```{r}
+# see what came back
+df_scrape_raw |> 
+  select(title, organo, titulacion) |> 
+  head(10)
+
+# check organo field for province or region information...
+df_scrape_raw |> 
+  pull(organo) |> 
+  head(20)
+```
+
+We have searched through job title, 'organo' and required qualifications and, as we can see, "órgano" names do have the respective region/provinces names, so we will proceed to clean it.
+
+#### Cleaning Dataset
+
+We will be using 'titulación' to determine pay group, as under Spain's EBEP framework, civil service pay groups are legally defined by minimum qualification requirement. Then, we retrieve the average salary. Those salary figures are total annual *retribuciones básicas* (sueldo base + 2 pagas extraordinarias) from the official 2026 pay table published by the Dirección General de Costes de Personal (Real Decreto-ley 14/2025, de 2 de diciembre). These figures do not include *complemento de destino*, *complemento específico* (which vary by post level and are listed separately in the same official table) or, obviously, *seniority*. These are the minimum possible earnings for each group, it is essential to understand that real salaries would be significantly higher.
+
+```{r}
+df_gob <- df_scrape_raw |>
+  filter(!is.na(title), title != "") |>
+  mutate(
+    # clean title
+    title = str_squish(title),
+    
+    title = str_remove(title, "^Ref\\.\\s*\\d+\\s*\\|\\s*") |>
+      str_to_title() |>
+      str_squish(),
+
+    # extract region from organo — it's after the last "-"
+    region = str_extract(organo, "-\\s*([A-ZÁÉÍÓÚÑ\\s]+)$") |>
+      str_remove("^-\\s*") |>
+      str_to_title() |>
+      str_squish(),
+    
+    # clean organo — keep only the organisation name
+    organo = str_remove(organo, "Órgano convocante:\\s*") |>
+      str_remove("-\\s*[A-ZÁÉÍÓÚÑ\\s]+$") |>
+      str_squish(),
+    
+    # clean titulacion — extract just the qualification
+    titulacion = str_remove(titulacion, "Titulación:\\s*") |>
+      str_squish(),
+    
+    # extract pay group from titulacion
+    salary_group = case_when(
+      str_detect(titulacion, regex("doctor|grado|licenciado|ingeniero superior", ignore_case = TRUE)) ~ "A1",
+      str_detect(titulacion, regex("diplomado|ingeniero técnico|graduado", ignore_case = TRUE)) ~ "A2",
+      str_detect(titulacion, regex("bachiller|técnico superior|FP2", ignore_case = TRUE)) ~ "C1",
+      str_detect(titulacion, regex("graduado escolar|ESO|FP1|auxiliar", ignore_case = TRUE)) ~ "C2",
+      str_detect(titulacion, regex("certificado de escolaridad", ignore_case = TRUE)) ~ "E",
+      TRUE ~ NA_character_
+    ),
+    
+    # map to salary
+    salary_avg = case_when(
+      salary_group == "A1" ~ 18358.98,
+      salary_group == "A2" ~ 16143.90,
+      salary_group == "B"  ~ 14395.12,
+      salary_group == "C1" ~ 12364.40,
+      salary_group == "C2" ~ 10480.46,
+      salary_group == "E"  ~  9604.98,
+  TRUE ~ NA_real_
+),
+    
+    # extract number of posts
+    total_posts = str_extract(convocadas, "\\d+") |> as.integer(),
+    
+    sector_type = "public",
+    source      = "admin_gob_scrape"
+  ) |>
+  select(title, organo, titulacion, salary_group, salary_avg,
+         total_posts, region, sector_type, source)
+
+glimpse(df_gob)
+nrow(df_gob)
+
+# check region extraction worked
+df_gob |> count(region) |> arrange(desc(n))
+```
+
+We also check how many NAs we have for salary group:
+
+```{r}
+df_gob |> 
+  summarise(
+    total = n(),
+    na_salary = sum(is.na(salary_group))
+    )
+```
+
+As we can see, the number is significant. We have to take into consideration that the website does not display 'titulación' for all job offers, some listings omit the qualification field in the search results summary, therefore we need to be cautious about this and understand that they represent only the subset of posts where qualification was both displayed and matched by our patterns.
+
+#### Region Standardization
+
+Some entries contain province names instead of autonomous community names, and some Spanish region names have multiple variants. We standardize using a case_when() to ensure consistent region labels across the dataset, enabling valid comparison with the Adzuna regional data.
+
+```{r}
+df_gob_clean <- df_gob |>
+  mutate(
+    region = case_when(
+      # merge Valencia variants
+      str_detect(region, regex("valencian|valencia", ignore_case = TRUE)) ~ "Comunidad Valenciana",
+      # provinces → their region
+      region %in% c("Granada", "Sevilla", "Málaga", "Córdoba", "Jaén", 
+                    "Almería", "Huelva", "Cádiz") ~ "Andalucía",
+      region %in% c("Zaragoza", "Huesca", "Teruel") ~ "Aragón",
+      region %in% c("Las Palmas", "Santa Cruz De Tenerife") ~ "Canarias",
+      region %in% c("Burgos", "León", "Salamanca", "Valladolid", 
+                    "Zamora", "Ávila", "Segovia", "Soria", "Palencia",
+                    "Castilla Y León") ~ "Castilla y León",
+      region %in% c("Toledo", "Ciudad Real", "Albacete", 
+                    "Cuenca", "Guadalajara") ~ "Castilla-La Mancha",
+      region %in% c("Barcelona", "Girona", "Lleida", "Tarragona") ~ "Cataluña",
+      region %in% c("Bilbao", "Vitoria", "San Sebastián", 
+                    "Álava", "Guipúzcoa", "Vizcaya") ~ "País Vasco",
+      region %in% c("Pamplona", "Navarra") ~ "Navarra",
+      region %in% c("Logroño") ~ "La Rioja",
+      region %in% c("Oviedo", "Asturias") ~ "Asturias",
+      region %in% c("Santander") ~ "Cantabria",
+      region %in% c("Mérida", "Badajoz", "Cáceres") ~ "Extremadura",
+      region %in% c("Santiago", "Coruña", "Vigo", "Lugo", "Ourense",
+                    "Pontevedra") ~ "Galicia",
+      region %in% c("Murcia") ~ "Murcia",
+      region %in% c("Palma", "Baleares", "Illes Balears") ~ "Islas Baleares",
+      region == "Bizkaia"             ~ "País Vasco",
+      # keep Madrid and already-correct regions as is
+      TRUE ~ region
+    )
+  )
+
+df_gob_clean |> count(region, sort = TRUE) |> print(n = 30)
+```
+
+As expected, some entries return NA for region. These are organisations that do not include a region suffix in their name. We recover these by paying attention to which 'órgano' provides no region, and we pattern match with different criteria.
+
+#### Recovering NAs for Region
+
+Some entries have no region suffix in the 'órgano' field (for example, EU institutions). We recover these by pattern matching on the organisation name itself. Entries that cannot be assigned to a region are classified as "Nacional".
+
+```{r}
+# see 'órgano' where region is NA
+df_gob_clean |> 
+  filter(is.na(region)) |> 
+  pull(organo) |> 
+  unique()
+
+df_gob_clean <- df_gob_clean |>
+  mutate(
+    region = case_when(
+      # recover NAs with specific words
+      is.na(region) & str_detect(organo, regex("castilla.*león|junta de castilla", ignore_case = TRUE)) ~ "Castilla y León",
+      is.na(region) & str_detect(organo, regex("extremadura|junta de extremadura", ignore_case = TRUE)) ~ "Extremadura",
+      is.na(region) & str_detect(organo, regex("madrid|comunidad de madrid", ignore_case = TRUE))       ~ "Madrid",
+      is.na(region) & str_detect(organo, regex("andaluc|junta de andalucía", ignore_case = TRUE))       ~ "Andalucía",
+      is.na(region) & str_detect(organo, regex("cataluña|generalitat", ignore_case = TRUE))             ~ "Cataluña",
+      is.na(region) & str_detect(organo, regex("valencian|generalitat valenciana", ignore_case = TRUE)) ~ "Comunidad Valenciana",
+      is.na(region) & str_detect(organo, regex("galicia|xunta", ignore_case = TRUE))                   ~ "Galicia",
+      is.na(region) & str_detect(organo, regex("país vasco|euskadi|gobierno vasco", ignore_case = TRUE)) ~ "País Vasco",
+      is.na(region) & str_detect(organo, regex("aragón|gobierno de aragón", ignore_case = TRUE))       ~ "Aragón",
+      is.na(region) & str_detect(organo, regex("canarias|gobierno de canarias", ignore_case = TRUE))   ~ "Canarias",
+      is.na(region) & str_detect(organo, regex("murcia|región de murcia", ignore_case = TRUE))         ~ "Murcia",
+      is.na(region) & str_detect(organo, regex("navarra|gobierno de navarra", ignore_case = TRUE))     ~ "Navarra",
+      is.na(region) & str_detect(organo, regex("rioja|gobierno de la rioja", ignore_case = TRUE))      ~ "La Rioja",
+      is.na(region) & str_detect(organo, regex("asturias|principado", ignore_case = TRUE))             ~ "Asturias",
+      is.na(region) & str_detect(organo, regex("cantabria|gobierno de cantabria", ignore_case = TRUE)) ~ "Cantabria",
+      is.na(region) & str_detect(organo, regex("balears|baleares|govern.*illes", ignore_case = TRUE))          ~ "Islas Baleares",
+      is.na(region) & str_detect(organo, regex("ceuta", ignore_case = TRUE))   ~ "Ceuta",
+      is.na(region) & str_detect(organo, regex("melilla", ignore_case = TRUE)) ~ "Melilla",
+      is.na(region) & str_detect(organo, regex("nacional|ministerio|estado|administración general|presidencia", ignore_case = TRUE)) ~ "Nacional",
+      is.na(region) & str_detect(organo, regex("europea", ignore_case = TRUE)) ~ "Europa",
+      TRUE ~ region
+    )
+  )
+
+df_gob_clean |> count(region, sort = TRUE) |> print(n = 30)
+
+# save cleaned version
+write_csv(df_gob_clean, "clean_data_scraping.csv")
+```
+
+#### Web Scraping: Limitations
+
+Several limitations should be considered when interpreting our web scraping results:
+
+-   The robot.txt recommends a Crawl-delay of 60 seconds and restricts scraping to between 1:00 AM and 6:45 AM. Our implementation uses a 3-second delay between requests and was run outside the recommended hours. These can be adjusted, but for us, it was necessary and justified for the academic context.
+
+-   Job titles, pay groups and qualification fields on the portal are JavaScript-rendered and therefore invisible to traditional static scrapers (rvest/httr2), so Selenium was required to access this content. This also means the dataset cannot be collected without a running browser session.
+
+-   We were unable to filter results by publication date. The advanced search form's date fields are embedded in a JavaScript element that is still inaccessible to Selenium. We approximated our coverage by capping at 50 pages, consistent with our Adzuna 30-day window, but this is an approximation rather than an exact date filter.
+
+-   Similar to our API data, the salary data is incomplete. The 'titulación' field is absent for a significant proportion of listings. Salary figures represent "retribuciones básicas" only (sueldo base + pagas extraordinarias), excluding elements such as complemento de destino, complemento específico and seniority increments. This likely means that the public sector salaries in our dataset are systematically underestimated relative to true compensation.
+
+## Visualizations and Data Exploration
+
+Here, we include a number of graphs that explore salaries, key phrases, region, and categories across the public and the private sector, using our created dataframes.
+
+### Data Completeness
+
+**Adzuna API: Complete Missing Data**
+
+```{r}
+# Data available for each job listing - Categories 
+all_jobs_df |> 
+  summarise(
+    total_rows = n(),
+    `Contract Type` = sum(!is.na(contract_type)),
+    `Has Min Salary` = sum(!is.na(salary_min)),
+    `Has Max Salary` = sum(!is.na(salary_max)),
+    `Provides Location` = sum(!is.na(latitude))) |> 
+   pivot_longer(-total_rows, 
+               names_to = "variable", 
+               values_to = "count") |> 
+  mutate(pct = round(count/ total_rows * 100, 1)) |> 
+  ggplot(aes(x = reorder(variable, pct), 
+             y = pct)) + 
+  geom_col(fill = "steelblue") + 
+  geom_text(aes(label = paste0(pct, "%")), 
+            hjust = -0.5)  + 
+  scale_y_continuous(limits = c(0,100)) + 
+  coord_flip() + 
+  labs( title = "Data Completeness for ADZUNA Job Listings", 
+        x = NULL, 
+        y = "% of listings with available data") + 
+  theme_minimal() 
+```
+
+**Adzuna API: Missing Data, Jobs with ML/AI Mentions**
+
+```{r}
+# Data available for each job listing - Phrases 
+phrase_data |> 
+  summarise(
+    total_rows = n(),
+    `Contract Type` = sum(!is.na(contract_time)),
+    `From an Unknown Category` = sum(category_label != "Unknown"),
+    `Has Min Salary` = sum(!is.na(salary_min)),
+    `Has Max Salary` = sum(!is.na(salary_max)),
+    `Provides Location` = sum(!is.na(latitude))) |> 
+  pivot_longer(-total_rows, 
+               names_to = "variable", 
+               values_to = "count") |> 
+  mutate(pct = round(count/ total_rows * 100, 1)) |> 
+  ggplot(aes(x = reorder(variable, pct), 
+             y = pct)) + 
+  geom_col(fill = "steelblue") + 
+  geom_text(aes(label = paste0(pct, "%")), 
+            hjust = -0.5)  + 
+  scale_y_continuous(limits = c(0,100)) + 
+  coord_flip() + 
+  labs(title = "Data Completeness for ADZUNA AI/ML & Data Science Job Listings", 
+        x = NULL, 
+        y = "% of listings with available data") + 
+  theme_minimal() 
+```
+
+**Gob Web Scrape: Complete Missing Data**
+
+```{r}
+df_gob_clean
+
+# Data available for each job listing - Phrases 
+df_gob_clean |> 
+  filter(!is.na(total_posts)) |> 
+  summarise(
+     total_rows = n(),
+    `Organisation` = sum(!is.na(organo)),
+    `Has Salary` = sum(!is.na(salary_avg)),
+    `Has Jobs Available` = sum(!is.na(total_posts)),
+    `Provides Location` = sum(!is.na(region))) |> 
+  pivot_longer(-total_rows, 
+               names_to = "variable", 
+               values_to = "count") |> 
+  mutate(pct = round(count/ total_rows * 100, 1)) |> 
+  ggplot(aes(x = reorder(variable, pct), 
+             y = pct)) + 
+  geom_col(fill = "steelblue") + 
+  geom_text(aes(label = paste0(pct, "%")), 
+            hjust = -0.5)  + 
+  scale_y_continuous(limits = c(0,100)) + 
+  coord_flip() + 
+  labs(title = "Data Completeness for Portal de Empleo Job Listings", 
+        x = NULL, 
+        y = "% of listings with available data") + 
+  theme_minimal() 
+```
+
+### Salary Graphs
+
+Here, we create a computed average salary, and exclude sectors with fewer than 5 salary observations to avoid drawing conclusions from unreliable data. Salaries below €5,000 are treated as data errors (likely hourly or monthly rates mixed with annual figures) and set to NA.
+
+**Adzuna API: Average Salary Across Job Categories**
+
+```{r}
+all_jobs_df |>
+  filter(!is.na(salary_min),
+         !is.na(salary_max),
+         salary_min > 5000) |>    # filter out unrealistic values
+  mutate(salary_median = (salary_min + salary_max) / 2) |>
+  group_by(category_label) |>
+  summarise(median_salary = median(salary_median), 
+            n = n(), 
+            .groups = "drop") |>
+  filter(n >= 5) |> 
+  ggplot(aes(x = reorder(category_label, median_salary), 
+             y = median_salary)) +
+  geom_col(fill = "#1A5276") +
+  geom_text(aes(label = paste0("€", round(median_salary / 1000, 1), "k")),
+            hjust = -0.2, size = 3) +
+  coord_flip() +
+  labs(title = "Median Salary by Job Category in Spain ",
+       subtitle = "Adzuna API",
+       x = NULL,
+       y = "Median Salary (€)") +
+  theme_minimal()+ 
+  theme(axis.text.y = element_text(size = 7))
+```
+
+**Adzuna API: Median Salary by Jobs Mentioning ML/AI phrases**
+
+This code has been modified to include median salaries with less than 5 jobs, but a gradient applied to signify their reliability, as we observed low numbers of listings with salary data.
+
+```{r}
+phrase_data |>
+  filter(!is.na(salary_min),
+         !is.na(salary_max),
+         salary_min > 5000) |>    # filter out unrealistic values
+  mutate(salary_median = (salary_min + salary_max) / 2) |> # cap at five as this is the base
+  group_by(search_title) |>
+  summarise(median_salary = median(salary_median),         
+            n = n(), 
+            n_capped = pmin(n(),5),
+            .groups = "drop") |>
+  ggplot(aes(x = reorder(search_title, median_salary), 
+             y = median_salary, 
+             fill = n_capped)) +
+  geom_col() +
+  scale_fill_gradient(low = "lightblue", high = "steelblue",
+                      name = "No. of listings\nwith salary data") +
+  geom_text(aes(label = paste0("€", round(median_salary / 1000, 1), "k")),
+            hjust = -0.2, size = 3) +
+  coord_flip() +
+  labs(title = "Median Salary by AI/ML Term in Spain",
+       subtitle = "ADZUNA API",
+       x = NULL,
+       y = "Median Salary (€)") +
+  theme_minimal()+ 
+  theme(axis.text.y = element_text(size = 7))
+```
+
+**Web Scrape: Median Salary by Job Rank Level**
+
+For this we remove the limits on the salary data as they are provided by the government as average salaries within the offered positions, rather than than for the specific job listing. We also remove NAs and due to the large number of job titles, we show the median salary per job rank.
+
+```{r}
+df_gob_clean |>
+  filter(!is.na(salary_avg), !is.na(salary_group)) |>
+  group_by(title, salary_group) |>
+  summarise(
+    salary_avg = median(salary_avg),
+    n = n(),
+    .groups = "drop") |>
+  ggplot(aes(x = reorder(salary_group, salary_avg),
+             y = salary_avg)) +
+  coord_flip() +
+  geom_col(fill = "#1A5276") +
+  labs(
+    title = "Public Sector Job Salaries in Spain",
+    x = "Job rank (lowest to highest)",
+    y = "Median Salary (€)") +
+  theme_minimal()
+```
+
+**Salary Distributions**: Public vs Private Job listings
+
+Note: Interpret with caution due to previously mentioned limitations of salary data (especially in the public sector).
+
+```{r}
+bind_rows(
+  all_jobs_df |>
+    filter(!is.na(salary_min), salary_min > 5000) |>
+    mutate(
+      salary_avg = (salary_min + salary_max) / 2,
+      source = "Adzuna (Private Sector)") |>
+    select(salary_avg, source),
+
+  df_gob_clean |>
+    filter(!is.na(salary_avg)) |>
+    mutate(source = "Public Sector") |>
+    select(salary_avg, source)) |>
+  ggplot(aes(x = source, y = salary_avg, fill = source)) +
+  geom_violin(alpha = 0.6) +
+  geom_boxplot(width = 0.1, alpha = 0.8, outlier.shape = NA) +
+  scale_fill_manual(values = c("steelblue", "tomato")) +
+  scale_y_continuous(labels = scales::comma) +
+  labs(
+    title = "Salary Distribution: Private vs Public Sector Jobs in Spain",
+    x = NULL,
+    y = "Salary (€)") +
+  theme_minimal() +
+  theme(legend.position = "none")
+```
+
+**Adzuna API: Salary by Region**
+
+```{r}
+all_jobs_df |> 
+  filter(!is.na(latitude), # Remove job listings without specific location
+    !is.na(salary_min)) |> 
+  mutate(salary_avg = (salary_min + salary_max) / 2) |> 
+  group_by(area) |> 
+  filter(n() >= 5) |> 
+  ungroup() |> 
+  ggplot(aes(x = reorder(area, salary_avg, FUN = median), 
+             y = salary_avg)) +
+  geom_boxplot(fill = "#AED6F1", 
+               outlier.color = "#1A5276", 
+               outlier.alpha = 0.5) +
+  coord_flip() +
+  scale_y_continuous(labels = scales::comma) +
+  labs(
+    title = "Salary Distribution by Region in Spain",
+    subtitle = "Regions with 5+ salary observations",
+    x = NULL,
+    y = "Annual Salary (€)",
+    caption = paste("Source: Adzuna API |", Sys.Date())) +
+  theme_minimal(base_size = 12)
+```
+
+**Gob Web Scraping: Salary by Region**
+
+```{r}
+df_gob_clean |> 
+  filter(!is.na(region), # Incase future scrapes include NAs
+    !is.na(salary_avg)) |> 
+  group_by(region) |> 
+  filter(n() >= 5) |> 
+  ungroup() |> 
+  ggplot(aes(x = reorder(region, salary_avg, FUN = median), 
+             y = salary_avg)) +
+  geom_boxplot(fill = "#AED6F1", 
+               outlier.color = "#1A5276", 
+               outlier.alpha = 0.5) +
+  coord_flip() +
+  scale_y_continuous(labels = scales::comma) +
+  labs(
+    title = "Salary Distribution by Region in Spain",
+    subtitle = "Regions with 5+ salary observations",
+    x = NULL,
+    y = "Annual Salary (€)",
+    caption = paste("Source: administracion.gob.es |", Sys.Date())
+  ) +
+  theme_minimal(base_size = 12)
+```
+
+**Salary by Region: Public vs. Private Sector**
+
+```{r}
+bind_rows(
+  all_jobs_df |>
+    filter(!is.na(salary_min), !is.na(salary_max), salary_min > 5000) |>
+    mutate(
+      salary = (salary_min + salary_max) / 2,
+      sector_type = "Private") |>
+    select(salary, sector_type),
+  
+  df_gob_clean |>
+    filter(!is.na(salary_avg)) |>
+    mutate(
+        region = case_when(
+        region == "Asturias" ~ "Principado de Asturias",
+        region == "Navarra"  ~ "Comunidad Foral de Navarra",
+        region == "Madrid" ~ "Comunidad de Madrid",
+        region == "Comunidad Valenciana" ~ "Comunitat Valenciana ",
+        region == "Islas Baleares" ~ "Illes Balears",
+        region == "Murcia" ~ "Región de Murcia",
+        region == "Ceuta" ~ "Ciudad de Ceuta",
+        TRUE ~ region)) |>
+    rename(salary = salary_avg) |>
+    select(salary, sector_type)) |>
+  
+  ggplot(aes(x = salary, fill = sector_type)) +
+  geom_density(alpha = 0.6) +
+  scale_fill_manual(values = c("Private" = "steelblue", 
+                               "Public" = "tomato")) +
+  scale_x_continuous(labels = scales::comma, limits = c(0, 150000)) +
+  labs(
+    title = "Salary Distribution: Public vs Private Sector in Spain",
+    subtitle = "Private sector from Adzuna API | Public sector from BOE scrape",
+    x = "Salary (€)",
+    y = "Density",
+    fill = "Sector") +
+  theme_minimal()
+```
+
+### Geographical Graphs
+
+**Adzuna API:** **Interactive Map by Region and Salary**
+
+```{r}
+# Prepare data
+map_data <- all_jobs_df |>
+  filter(!is.na(latitude), !is.na(longitude))
+
+# Create shared data object for crosstalk filtering
+shared_data <- SharedData$new(map_data)
+
+my_colours <- colorFactor(
+  palette = rainbow(n_distinct(all_jobs_df$category_label)),
+  domain  = map_data$category_label)
+
+# Build the interactive map with dropdown
+bscols(filter_select(id = "category",
+                label = "Select Category",
+                sharedData = shared_data,
+                group = ~category_label),
+  leaflet(shared_data) |>
+    addProviderTiles(providers$CartoDB.Positron) |>
+    setView(lng = -3.69, lat = 40.42, zoom = 6) |>
+    addCircleMarkers(
+      lng = ~longitude,
+      lat = ~latitude,
+      color = ~my_colours(category_label),
+      radius = 3,
+      fillOpacity = 0.7,
+      stroke = FALSE,
+      popup = ~paste0("<b>", title, "</b><br>",
+                      "Category: ", category_label, "<br>",
+                      "Location: ", area, "<br>",
+                      "Salary: €", salary_min, " - €", salary_max)) |>
+    addLegend(pal = my_colours,
+              values = ~category_label,
+              title  = "Category")) |>
+    htmlwidgets::onRender("
+      function(el, x) {
+      var legend = el.querySelector('.legend');
+      legend.style.maxHeight = '200px';
+      legend.style.overflowY = 'auto';}")
+```
+
+**Static Map of Government Job Listings (by count)**
+
+```{r}
+spain_regions <- gisco_get_nuts(
+  country    = "ES",
+  nuts_level = 2,  # level 2 = autonomous communities
+  resolution = "10")
+
+# Count jobs per region
+region_counts <- df_gob_clean |>
+  filter(!is.na(region)) |>
+  mutate(region = case_when(
+    region == "Asturias" ~ "Principado de Asturias",
+    region == "Navarra" ~ "Comunidad Foral de Navarra",
+    region == "Madrid" ~ "Comunidad de Madrid",
+    region == "Castilla y León"  ~ "Castilla y León",
+    region == "Comunidad Valenciana" ~ "Comunitat Valenciana ",  # trailing space
+    region == "Islas Baleares" ~ "Illes Balears",
+    region == "Murcia" ~ "Región de Murcia",
+    region == "Canarias" ~ "Canarias",
+    region == "Ceuta" ~ "Ciudad de Ceuta",
+    TRUE ~ region)) |>
+  count(region)
+
+# Check for mismatches
+anti_join(region_counts, 
+          spain_regions, 
+          by = c("region" = "NUTS_NAME"))
+
+# Join
+map_data <- spain_regions |>
+  left_join(region_counts, by = c("NUTS_NAME" = "region"))
+
+# Plot
+ggplot(map_data) +
+  geom_sf(aes(fill = n), colour = "white", size = 0.3) +
+  scale_fill_gradient(
+    low = "lightblue",
+    high = "steelblue",
+    na.value = "grey90",
+    name = "Job listings") +
+  labs(title = "Public Sector Job Listings by Region in Spain") +
+  theme_void()
+
+```
+
+## Conclusions
+
+Even though some elements across our data frames could not be compared, the very nuances we observed are in themselves telling about the differing public and private job markets in Spain. Differences in salary transparency, regional counts, and missing data paint a telling story of the labor market, which we can see in the data. It will be intriguing to see if the observed trends we discovered while building this scraper may change over time.
