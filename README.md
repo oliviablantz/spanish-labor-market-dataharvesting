@@ -112,5 +112,5 @@ Specific limitations:
 ### Web Scraper
 
 - As the structure of webpages can change over time, our scraper may need to be adjusted.
-- Salary data, as well as phrase data, should be interpreted with caution. Users should be mindful of the amount of missing observations in the salary variables.
+- Salary data should be interpreted with caution. Users should be mindful of the amount of missing observations in the salary variables.
 - It's vital to read the limitations and code notes carefully to correctly interpret outputs. 
